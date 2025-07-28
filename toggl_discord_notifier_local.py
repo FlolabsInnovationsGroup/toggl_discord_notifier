@@ -4,59 +4,64 @@ import base64
 import requests
 from datetime import datetime, timedelta, timezone
 
-# Config file paths
 USERS_FILE = "toggl_users.json"
 TOKENS_FILE = "toggl_api_tokens.json"
 CACHE_FILE = "last_seen.json"
-
-# Time window to check (minutes)
-TIME_WINDOW_MINUTES = 30
-
+TIME_WINDOW_MINUTES = 5
 
 def load_json(path):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-
 def save_json(path, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
-
 
 def load_last_seen():
     if not os.path.exists(CACHE_FILE):
         return {}
     return load_json(CACHE_FILE)
 
-
 def update_last_seen(user_name, entry_id, cache):
     cache[user_name] = str(entry_id)
     save_json(CACHE_FILE, cache)
 
-
-def get_time_entries(api_token, since):
-    until = datetime.now(timezone.utc)
-
-    # Format both timestamps as RFC3339 with 'Z' UTC suffix
-    start_str = since.replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    end_str = until.replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-    #print(f"[DEBUG] start_date={start_str}, end_date={end_str}")
-
-    url = (
-        f"https://api.track.toggl.com/api/v9/me/time_entries"
-        f"?start_date={start_str}&end_date={end_str}"
-    )
+def fetch_workspace_entries(api_token, workspace_id, since, until):
+    url = "https://api.track.toggl.com/reports/api/v2/details"
     headers = {
         "Authorization": "Basic " + base64.b64encode(f"{api_token}:api_token".encode()).decode()
     }
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
-        return response.json()
-    else:
-        print(f"Failed to fetch entries: {response.status_code} - {response.text}")
-        return []
+    params = {
+        "workspace_id": workspace_id,
+        "since": since.strftime("%Y-%m-%d"),
+        "until": until.strftime("%Y-%m-%d"),
+        "user_agent": "toggl-discord-bot",
+        "page": 1
+    }
 
+    all_entries = []
+
+    while True:
+        response = requests.get(url, headers=headers, params=params)
+        if response.status_code != 200:
+            print(f"Failed to fetch report entries: {response.status_code} - {response.text}")
+            break
+
+        data = response.json()
+        entries = data.get("data", [])
+        if not entries:
+            break
+
+        all_entries.extend(entries)
+
+        total_count = data.get("total_count", 0)
+        per_page = len(entries)
+        if params["page"] * per_page >= total_count:
+            break
+
+        params["page"] += 1
+
+    return all_entries
 
 def send_discord_message(webhook_url, message):
     payload = {"content": message}
@@ -67,54 +72,84 @@ def send_discord_message(webhook_url, message):
     except Exception as e:
         print(f"Discord error: {e}")
 
-
 def main():
     toggl_users = load_json(USERS_FILE)
     toggl_tokens = load_json(TOKENS_FILE)
     last_seen = load_last_seen()
 
     user_map = {u["name"]: u["discord_webhook_url"] for u in toggl_users}
-    since = datetime.now(timezone.utc) - timedelta(minutes=TIME_WINDOW_MINUTES)
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(minutes=TIME_WINDOW_MINUTES)
 
     for token_entry in toggl_tokens:
         token = token_entry["api_token"]
-        entries = get_time_entries(token, since)
-        
-        print (f"[DEBUG] Fetched {len(entries)} entries for token {token}")
+
+        # Optional: You can hardcode or fetch workspace ID via /workspaces endpoint
+        workspace_id = fetch_workspace_id(token)
+        if not workspace_id:
+            print(f"⚠️ Could not determine workspace ID for token ending in ...{token[-4:]}")
+            continue
+
+        entries = fetch_workspace_entries(token, workspace_id, since, now)
+        print(f"[DEBUG] Fetched {len(entries)} entries from workspace {workspace_id}")
 
         for entry in entries:
-            user = entry.get("user", {})
-            user_name = user.get("fullname")
             entry_id = entry.get("id")
-            
-            print(f"[DEBUG] Entry by user: {entry.get('user', {}).get('fullname')} | ID: {entry.get('id')}")
+            user_name = entry.get("user")
+            start_str = entry.get("start")
+            description = entry.get("description", "No description")
+            project = entry.get("project", "No project")
+            tags = entry.get("tags", [])
+            tag_str = ", ".join(tags) if tags else "No tags"
+            duration_ms = entry.get("dur", 0)
 
             if not user_name or not entry_id:
-                print("[DEBUG] Skipping entry due to missing user or ID.")
-                print(json.dumps(entry, indent=2))
                 continue
             if user_name not in user_map:
                 continue
             if str(entry_id) == last_seen.get(user_name):
                 continue
 
-            description = entry.get("description", "No description")
-            start = entry.get("start", "")[:19].replace("T", " ")
-            duration_sec = entry.get("duration", 0)
-            duration_min = max(1, duration_sec // 60)
+            try:
+                start_dt = datetime.strptime(start_str, "%Y-%m-%dT%H:%M:%S%z")
+            except Exception:
+                start_dt = now  # fallback if parsing fails
+
+            if start_dt < since:
+                continue  # skip old entries
+
+            duration_min = max(1, duration_ms // 60000)
 
             message = (
                 f"🕒 **New Time Entry Added**\n"
                 f"👤 User: {user_name}\n"
+                f"📁 Project: {project}\n"
+                f"🏷️ Tags: {tag_str}\n"
                 f"📝 Task: {description}\n"
                 f"🕐 Time Tracked: {duration_min} min\n"
-                f"🗓️ Start: {start}"
+                f"🗓️ Start: {start_dt.strftime('%Y-%m-%d %H:%M')}\n"
+                f"_________\n"
             )
+
 
             print(f"Sending message for {user_name} - Entry ID {entry_id}")
             send_discord_message(user_map[user_name], message)
             update_last_seen(user_name, entry_id, last_seen)
 
+def fetch_workspace_id(api_token):
+    url = "https://api.track.toggl.com/api/v9/workspaces"
+    headers = {
+        "Authorization": "Basic " + base64.b64encode(f"{api_token}:api_token".encode()).decode()
+    }
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            workspaces = response.json()
+            if workspaces:
+                return workspaces[0]["id"]  # use the first one
+    except Exception as e:
+        print(f"Error fetching workspace ID: {e}")
+    return None
 
 if __name__ == "__main__":
     main()
