@@ -57,7 +57,7 @@ def lambda_handler(event, context):
     toggl_tokens = get_s3_json(TOKENS_FILE)
 
     user_map = {u["name"]: u["discord_webhook_url"] for u in toggl_users}
-    since = datetime.utcnow() - timedelta(minutes=5)
+    since = datetime.now(datetime.timezone.utc) - timedelta(minutes=5)
 
     for token_entry in toggl_tokens:
         token = token_entry["api_token"]
