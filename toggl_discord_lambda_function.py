@@ -10,7 +10,7 @@ S3_BUCKET = os.environ["S3_BUCKET"]
 USERS_FILE = "toggl_users.json"
 TOKENS_FILE = "toggl_api_tokens.json"
 DYNAMODB_TABLE = os.environ["DYNAMODB_TABLE"]
-TIME_WINDOW_MINUTES = 5
+TIME_WINDOW_MINUTES = 3
 
 s3 = boto3.client("s3")
 dynamodb = boto3.resource("dynamodb")

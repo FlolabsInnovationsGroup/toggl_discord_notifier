@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 USERS_FILE = "toggl_users.json"
 TOKENS_FILE = "toggl_api_tokens.json"
 CACHE_FILE = "last_seen.json"
-TIME_WINDOW_MINUTES = 5
+TIME_WINDOW_MINUTES = 3
 
 def load_json(path):
     with open(path, "r", encoding="utf-8") as f:
