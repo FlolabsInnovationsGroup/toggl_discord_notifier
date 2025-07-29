@@ -72,6 +72,15 @@ def send_discord_message(webhook_url, message):
     except Exception as e:
         print(f"Discord error: {e}")
 
+
+def convert_ms_to_hms(milliseconds):
+    minutes = milliseconds // 60000
+    seconds = (milliseconds % 60000) // 1000
+    hours = minutes // 60
+    mins = minutes % 60
+    return f"{hours}h {mins}m {seconds}s"
+
+
 def main():
     toggl_users = load_json(USERS_FILE)
     toggl_tokens = load_json(TOKENS_FILE)
@@ -114,23 +123,19 @@ def main():
                 start_dt = datetime.strptime(start_str, "%Y-%m-%dT%H:%M:%S%z")
             except Exception:
                 start_dt = now  # fallback if parsing fails
-
-            if start_dt < since:
-                continue  # skip old entries
-
-            duration_min = max(1, duration_ms // 60000)
-
+            
+            duration_f = convert_ms_to_hms(duration_ms)
+            
             message = (
                 f"🕒 **New Time Entry Added**\n"
                 f"👤 User: {user_name}\n"
                 f"📁 Project: {project}\n"
                 f"🏷️ Tags: {tag_str}\n"
                 f"📝 Task: {description}\n"
-                f"🕐 Time Tracked: {duration_min} min\n"
+                f"🕐 Time Tracked: {duration_f}\n"
                 f"🗓️ Start: {start_dt.strftime('%Y-%m-%d %H:%M')}\n"
                 f"_________\n"
             )
-
 
             print(f"Sending message for {user_name} - Entry ID {entry_id}")
             send_discord_message(user_map[user_name], message)
