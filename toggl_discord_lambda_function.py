@@ -91,6 +91,13 @@ def fetch_workspace_id(api_token):
         print(f"[ERROR] Workspace fetch error: {e}")
     return None
 
+def convert_ms_to_hms(milliseconds):
+    minutes = milliseconds // 60000
+    seconds = (milliseconds % 60000) // 1000
+    hours = minutes // 60
+    mins = minutes % 60
+    return f"{hours}h {mins}m {seconds}s"
+
 def lambda_handler(event, context):
     toggl_users = get_s3_json(USERS_FILE)
     toggl_tokens = get_s3_json(TOKENS_FILE)
@@ -131,18 +138,15 @@ def lambda_handler(event, context):
             except:
                 start_dt = now
 
-            if start_dt < since:
-                continue
-
-            duration_min = max(1, duration_ms // 60000)
-
+            duration_f = convert_ms_to_hms(duration_ms)
+            
             message = (
                 f"🕒 **New Time Entry Added**\n"
                 f"👤 User: {user_name}\n"
                 f"📁 Project: {project}\n"
                 f"🏷️ Tags: {tag_str}\n"
                 f"📝 Task: {description}\n"
-                f"🕐 Time Tracked: {duration_min} min\n"
+                f"🕐 Time Tracked: {duration_f}\n"
                 f"🗓️ Start: {start_dt.strftime('%Y-%m-%d %H:%M')}\n"
                 f"_________\n"
             )
