@@ -22,8 +22,13 @@ def load_last_seen():
         return {}
     return load_json(CACHE_FILE)
 
-def update_last_seen(user_name, entry_id, cache):
-    cache[user_name] = str(entry_id)
+def update_last_seen(user_name, entry_id, cache, max_entries=50):
+    if user_name not in cache:
+        cache[user_name] = []
+    if entry_id not in cache[user_name]:
+        cache[user_name].append(str(entry_id))
+        # Limit the stored list to avoid unbounded growth
+        cache[user_name] = cache[user_name][-max_entries:]
     save_json(CACHE_FILE, cache)
 
 def fetch_workspace_entries(api_token, workspace_id, since, until):
@@ -116,7 +121,7 @@ def main():
                 continue
             if user_name not in user_map:
                 continue
-            if str(entry_id) == last_seen.get(user_name):
+            if str(entry_id) in last_seen.get(user_name, []):
                 continue
 
             try:

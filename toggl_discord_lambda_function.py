@@ -7,10 +7,11 @@ from datetime import datetime, timedelta, timezone
 
 # Environment variables
 S3_BUCKET = os.environ["S3_BUCKET"]
+DYNAMODB_TABLE = os.environ["DYNAMODB_TABLE"]
 USERS_FILE = "toggl_users.json"
 TOKENS_FILE = "toggl_api_tokens.json"
-DYNAMODB_TABLE = os.environ["DYNAMODB_TABLE"]
 TIME_WINDOW_MINUTES = 3
+MAX_SEEN_IDS = 50
 
 s3 = boto3.client("s3")
 dynamodb = boto3.resource("dynamodb")
@@ -22,15 +23,18 @@ def get_s3_json(filename):
 
 def get_last_seen(user_name):
     try:
-        res = table.get_item(Key={"user_name": user_name})
-        return res.get("Item", {}).get("last_seen")
+        response = table.get_item(Key={"user_name": user_name})
+        return response.get("Item", {}).get("last_seen", [])
     except Exception as e:
         print(f"[ERROR] DynamoDB get error for {user_name}: {e}")
-        return None
+        return []
 
 def update_last_seen(user_name, entry_id):
     try:
-        table.put_item(Item={"user_name": user_name, "last_seen": str(entry_id)})
+        existing_ids = get_last_seen(user_name)
+        if entry_id not in existing_ids:
+            updated_ids = (existing_ids + [entry_id])[-MAX_SEEN_IDS:]
+            table.put_item(Item={"user_name": user_name, "last_seen": updated_ids})
     except Exception as e:
         print(f"[ERROR] DynamoDB put error for {user_name}: {e}")
 
@@ -48,21 +52,18 @@ def fetch_workspace_entries(api_token, workspace_id, since, until):
     }
 
     all_entries = []
-
     while True:
         response = requests.get(url, headers=headers, params=params)
         if response.status_code != 200:
-            print(f"[ERROR] Report API failed: {response.status_code} - {response.text}")
+            print(f"[ERROR] Failed to fetch report entries: {response.status_code} - {response.text}")
             break
 
         data = response.json()
         entries = data.get("data", [])
         all_entries.extend(entries)
 
-        total_count = data.get("total_count", 0)
-        if len(all_entries) >= total_count:
+        if len(all_entries) >= data.get("total_count", 0):
             break
-
         params["page"] += 1
 
     return all_entries
@@ -72,9 +73,16 @@ def send_discord_message(webhook_url, message):
     try:
         r = requests.post(webhook_url, json=payload)
         if r.status_code != 204:
-            print(f"[ERROR] Discord error: {r.status_code} - {r.text}")
+            print(f"[ERROR] Failed to send to Discord: {r.status_code} - {r.text}")
     except Exception as e:
-        print(f"[ERROR] Discord exception: {e}")
+        print(f"[ERROR] Discord send failed: {e}")
+
+def convert_ms_to_hms(milliseconds):
+    minutes = milliseconds // 60000
+    seconds = (milliseconds % 60000) // 1000
+    hours = minutes // 60
+    mins = minutes % 60
+    return f"{hours}h {mins}m {seconds}s"
 
 def fetch_workspace_id(api_token):
     url = "https://api.track.toggl.com/api/v9/workspaces"
@@ -88,15 +96,8 @@ def fetch_workspace_id(api_token):
             if workspaces:
                 return workspaces[0]["id"]
     except Exception as e:
-        print(f"[ERROR] Workspace fetch error: {e}")
+        print(f"[ERROR] Workspace ID fetch failed: {e}")
     return None
-
-def convert_ms_to_hms(milliseconds):
-    minutes = milliseconds // 60000
-    seconds = (milliseconds % 60000) // 1000
-    hours = minutes // 60
-    mins = minutes % 60
-    return f"{hours}h {mins}m {seconds}s"
 
 def lambda_handler(event, context):
     toggl_users = get_s3_json(USERS_FILE)
@@ -110,14 +111,14 @@ def lambda_handler(event, context):
         token = token_entry["api_token"]
         workspace_id = fetch_workspace_id(token)
         if not workspace_id:
-            print(f"⚠️ Could not find workspace for token ending in ...{token[-4:]}")
+            print(f"⚠️ No workspace ID for token ending in ...{token[-4:]}")
             continue
 
         entries = fetch_workspace_entries(token, workspace_id, since, now)
-        print(f"[DEBUG] {len(entries)} entries fetched from workspace {workspace_id}")
+        print(f"[DEBUG] Fetched {len(entries)} entries from workspace {workspace_id}")
 
         for entry in entries:
-            entry_id = entry.get("id")
+            entry_id = str(entry.get("id"))
             user_name = entry.get("user")
             start_str = entry.get("start")
             description = entry.get("description", "No description")
@@ -130,27 +131,29 @@ def lambda_handler(event, context):
                 continue
             if user_name not in user_map:
                 continue
-            if str(entry_id) == get_last_seen(user_name):
+
+            seen_ids = get_last_seen(user_name)
+            if entry_id in seen_ids:
                 continue
 
             try:
                 start_dt = datetime.strptime(start_str, "%Y-%m-%dT%H:%M:%S%z")
-            except:
+            except Exception:
                 start_dt = now
 
-            duration_f = convert_ms_to_hms(duration_ms)
-            
+            duration_fmt = convert_ms_to_hms(duration_ms)
             message = (
                 f"🕒 **New Time Entry Added**\n"
                 f"👤 User: {user_name}\n"
                 f"📁 Project: {project}\n"
                 f"🏷️ Tags: {tag_str}\n"
                 f"📝 Task: {description}\n"
-                f"🕐 Time Tracked: {duration_f}\n"
+                f"🕐 Time Tracked: {duration_fmt}\n"
                 f"🗓️ Start: {start_dt.strftime('%Y-%m-%d %H:%M')}\n"
                 f"_________\n"
             )
 
+            print(f"[INFO] Notifying {user_name} for entry {entry_id}")
             send_discord_message(user_map[user_name], message)
             update_last_seen(user_name, entry_id)
 
